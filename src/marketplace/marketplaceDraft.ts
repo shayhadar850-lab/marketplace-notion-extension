@@ -4,11 +4,12 @@ export type DraftResult = {
   filledFields: string[];
   missingFields: string[];
   imageCount: number;
-  published: false;
+  published: boolean;
 };
 
 type FillOptions = {
   fetchImage?: typeof fetch;
+  publish?: boolean;
 };
 
 type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
@@ -64,6 +65,9 @@ const dropdownSearchMatchers = [
   "\u05d7\u05d9\u05e4\u05d5\u05e9 \u05e7\u05d8\u05d2\u05d5\u05e8\u05d9\u05d5\u05ea",
   "\u05d7\u05e4\u05e9 \u05e7\u05d8\u05d2\u05d5\u05e8\u05d9\u05d4"
 ];
+
+const nextStepMatchers = ["next", "continue", "\u05d4\u05d1\u05d0", "\u05d4\u05de\u05e9\u05da"];
+const publishMatchers = ["publish", "post", "submit", "\u05e4\u05e8\u05e1\u05dd", "\u05e4\u05e8\u05e1\u05d5\u05dd"];
 
 const labelText = (element: Element): string => element.textContent?.toLocaleLowerCase().trim() ?? "";
 
@@ -363,6 +367,37 @@ const findDropdownControl = (field: string): HTMLElement | null => {
   return control instanceof HTMLElement ? control : null;
 };
 
+const isDisabledElement = (element: Element): boolean => {
+  if (element instanceof HTMLButtonElement || element instanceof HTMLInputElement) {
+    return element.disabled;
+  }
+
+  return element.getAttribute("aria-disabled") === "true";
+};
+
+const actionButtonText = (element: Element): string =>
+  [
+    element.textContent ?? "",
+    element.getAttribute("aria-label") ?? "",
+    element.getAttribute("value") ?? "",
+    referencedText(element)
+  ].join(" ");
+
+const findActionButton = (matchers: string[]): HTMLElement | null => {
+  const candidates = Array.from(
+    document.querySelectorAll("button, [role='button'], input[type='button'], input[type='submit']")
+  );
+  const matchingButton = candidates.find((element) => {
+    if (!(element instanceof HTMLElement) || !isVisibleElement(element) || isDisabledElement(element)) {
+      return false;
+    }
+
+    return includesMatcher(actionButtonText(element), matchers);
+  });
+
+  return matchingButton instanceof HTMLElement ? matchingButton : null;
+};
+
 const optionSelector = "[role='option'], [role='menuitem'], [role='radio'], [aria-selected], span, div";
 
 const optionTextMatchesExactly = (value: string | null | undefined, aliases: string[]): boolean => {
@@ -611,6 +646,34 @@ const attachImages = async (product: MarketplaceProduct, fetchImage?: typeof fet
   return transfer.files.length;
 };
 
+const publishMarketplaceDraft = async (): Promise<boolean> => {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const publishButton = findActionButton(publishMatchers);
+    if (publishButton) {
+      dispatchTrustedLikeClick(publishButton);
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      return true;
+    }
+
+    const nextButton = findActionButton(nextStepMatchers);
+    if (!nextButton) {
+      break;
+    }
+
+    dispatchTrustedLikeClick(nextButton);
+    await new Promise<void>((resolve) => setTimeout(resolve, 350));
+  }
+
+  const publishButton = findActionButton(publishMatchers);
+  if (!publishButton) {
+    return false;
+  }
+
+  dispatchTrustedLikeClick(publishButton);
+  await new Promise<void>((resolve) => setTimeout(resolve, 250));
+  return true;
+};
+
 export const fillMarketplaceDraft = async (product: MarketplaceProduct, options: FillOptions = {}): Promise<DraftResult> => {
   const filledFields: string[] = [];
   const missingFields: string[] = [];
@@ -652,10 +715,18 @@ export const fillMarketplaceDraft = async (product: MarketplaceProduct, options:
     missingFields.push("images");
   }
 
+  let published = false;
+  if (options.publish && missingFields.length === 0) {
+    published = await publishMarketplaceDraft();
+    if (!published) {
+      missingFields.push("publish");
+    }
+  }
+
   return {
     filledFields,
     missingFields,
     imageCount,
-    published: false
+    published
   };
 };

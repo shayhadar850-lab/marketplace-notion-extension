@@ -22,17 +22,21 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
     return false;
   }
 
-  fillMarketplaceDraft(message.product, { fetchImage })
+  fillMarketplaceDraft(message.product, { fetchImage, publish: message.publish })
     .then((result) => {
+      const ok = message.publish ? result.published && result.missingFields.length === 0 : result.missingFields.length === 0;
       const response: FillDraftResponse = {
-        ok: result.missingFields.length === 0,
+        ok,
         missingFields: result.missingFields,
         filledFields: result.filledFields,
         imageCount: result.imageCount,
+        published: result.published,
         message:
-          result.missingFields.length === 0
-            ? "Draft filled. Review it carefully, then publish manually."
-            : `Draft partially filled. Missing fields: ${result.missingFields.join(", ")}`
+          result.published && result.missingFields.length === 0
+            ? "Draft filled and published."
+            : result.missingFields.length === 0
+              ? "Draft filled. Review it carefully, then publish manually."
+              : `Draft partially filled. Missing fields: ${result.missingFields.join(", ")}`
       };
       sendResponse(response);
     })
@@ -42,6 +46,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
         missingFields: [],
         filledFields: [],
         imageCount: 0,
+        published: false,
         message: error instanceof Error ? error.message : "Draft fill failed."
       } satisfies FillDraftResponse);
     });

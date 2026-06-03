@@ -6,6 +6,7 @@ export type ExtensionSettings = {
   defaultCurrency: string;
   defaultLocation: string;
   defaultCategory: string;
+  autoPublishDelaySeconds: number;
 };
 
 export type StoredState = {
@@ -19,7 +20,8 @@ const defaultSettings: ExtensionSettings = {
   databaseId: "d9b3d3c2-1c1a-4be6-b560-1f5a1aeab0da",
   defaultCurrency: "ILS",
   defaultLocation: "",
-  defaultCategory: "Home goods"
+  defaultCategory: "Home goods",
+  autoPublishDelaySeconds: 30
 };
 
 const defaultState: StoredState = {

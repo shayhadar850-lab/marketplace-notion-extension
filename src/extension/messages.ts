@@ -3,6 +3,7 @@ import type { MarketplaceProduct } from "../domain/marketplaceProduct";
 export type FillDraftMessage = {
   type: "FILL_MARKETPLACE_DRAFT";
   product: MarketplaceProduct;
+  publish?: boolean;
 };
 
 export type DownloadImageMessage = {
@@ -17,6 +18,7 @@ export type FillDraftResponse = {
   missingFields: string[];
   filledFields: string[];
   imageCount: number;
+  published: boolean;
   message: string;
 };
 

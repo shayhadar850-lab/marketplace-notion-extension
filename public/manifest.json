@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Notion Marketplace Draft Assistant",
   "version": "0.1.0",
-  "description": "Imports 3D print products from Notion, checks listing risk, and fills Facebook Marketplace drafts with manual publishing.",
+  "description": "Imports 3D print products from Notion, checks listing risk, and fills or publishes Facebook Marketplace listings.",
   "action": {
     "default_title": "Open Marketplace Queue"
   },
@@ -13,7 +13,7 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
-  "permissions": ["storage", "sidePanel", "activeTab", "scripting"],
+  "permissions": ["storage", "sidePanel", "activeTab", "scripting", "tabs"],
   "host_permissions": ["https://api.notion.com/*", "https://www.facebook.com/marketplace/*", "https://*/*", "http://*/*"],
   "content_scripts": [
     {

@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, Database, FileInput, RefreshCw, Settings, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Database, FileInput, RefreshCw, Rocket, Settings, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { applyMarketplaceDefaults, getBlockingIssues } from "../domain/productDefaults";
 import type { MarketplaceProduct, MarketplaceStatus } from "../domain/marketplaceProduct";
@@ -13,7 +13,18 @@ type Notice = {
 };
 
 const statuses: Array<MarketplaceStatus | "All"> = ["Ready", "Needs Fix", "Drafted", "Published", "All"];
-const emptyNotice: Notice = { tone: "ok", text: "Ready. Publish stays manual." };
+const emptyNotice: Notice = { tone: "ok", text: "Ready. Fill only stays manual; Auto publish is opt-in." };
+const marketplaceCreateUrl = "https://www.facebook.com/marketplace/create/item?locale=he_IL";
+
+const sleep = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+
+const clampDelaySeconds = (value: number) => {
+  if (!Number.isFinite(value)) {
+    return 30;
+  }
+
+  return Math.max(0, Math.min(600, Math.round(value)));
+};
 
 const statusClass = (status: MarketplaceStatus) => status.toLowerCase().replace(/\s+/g, "-");
 
@@ -26,7 +37,55 @@ const maskedToken = (token: string) => {
 };
 
 const openMarketplaceCreate = async () => {
-  await chrome.tabs.create({ url: "https://www.facebook.com/marketplace/create/item" });
+  await chrome.tabs.create({ url: marketplaceCreateUrl });
+};
+
+const waitForMarketplaceTab = async (tabId: number): Promise<void> => {
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.status === "complete" && tab.url?.startsWith("https://www.facebook.com/marketplace/")) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(handleUpdated);
+      reject(new Error("Marketplace tab took too long to load."));
+    }, 30000);
+
+    const handleUpdated = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo, updatedTab: chrome.tabs.Tab) => {
+      if (updatedTabId !== tabId) {
+        return;
+      }
+
+      if (changeInfo.status === "complete" && updatedTab.url?.startsWith("https://www.facebook.com/marketplace/")) {
+        clearTimeout(timeout);
+        chrome.tabs.onUpdated.removeListener(handleUpdated);
+        resolve();
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(handleUpdated);
+  });
+};
+
+const sendDraftToTab = async (
+  tabId: number,
+  product: MarketplaceProduct,
+  publish = false
+): Promise<FillDraftResponse> => {
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.url?.startsWith("https://www.facebook.com/marketplace/")) {
+    throw new Error("Open a Facebook Marketplace create listing tab first.");
+  }
+
+  const message: FillDraftMessage = { type: "FILL_MARKETPLACE_DRAFT", product, publish };
+
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content-script.js"] });
+    return chrome.tabs.sendMessage(tabId, message);
+  }
 };
 
 const sendDraftToActiveTab = async (product: MarketplaceProduct): Promise<FillDraftResponse> => {
@@ -36,14 +95,7 @@ const sendDraftToActiveTab = async (product: MarketplaceProduct): Promise<FillDr
     throw new Error("Open a Facebook Marketplace create listing tab first.");
   }
 
-  const message: FillDraftMessage = { type: "FILL_MARKETPLACE_DRAFT", product };
-
-  try {
-    return await chrome.tabs.sendMessage(tab.id, message);
-  } catch {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content-script.js"] });
-    return chrome.tabs.sendMessage(tab.id, message);
-  }
+  return sendDraftToTab(tab.id, product, false);
 };
 
 const productRisk = (product: MarketplaceProduct) => validateMarketplaceProduct(product);
@@ -54,13 +106,15 @@ export const App = () => {
     databaseId: "",
     defaultCurrency: "ILS",
     defaultLocation: "",
-    defaultCategory: "Home goods"
+    defaultCategory: "Home goods",
+    autoPublishDelaySeconds: 30
   });
   const [products, setProducts] = useState<MarketplaceProduct[]>([]);
   const [activeStatus, setActiveStatus] = useState<MarketplaceStatus | "All">("Ready");
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [notice, setNotice] = useState<Notice>(emptyNotice);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isAutoPublishing, setIsAutoPublishing] = useState(false);
   const [showSettings, setShowSettings] = useState(true);
 
   useEffect(() => {
@@ -87,6 +141,16 @@ export const App = () => {
   );
   const selectedProduct = effectiveProducts.find((product) => product.id === selectedId) ?? filteredProducts[0];
   const selectedRisk = selectedProduct ? productRisk(selectedProduct) : undefined;
+  const readyProducts = effectiveProducts.filter((product) => product.status === "Ready");
+
+  const blockingIssuesFor = (product: MarketplaceProduct) => {
+    const risk = productRisk(product);
+    const duplicateMessages = duplicates
+      .filter((item) => item.productId === product.id)
+      .map((item) => `Possible duplicate of ${item.duplicateOf}: ${item.reasons.join(", ")}`);
+
+    return getBlockingIssues({ errors: risk.errors, duplicateMessages });
+  };
 
   const updateSettings = async (next: ExtensionSettings) => {
     setSettings(next);
@@ -126,11 +190,7 @@ export const App = () => {
       return;
     }
 
-    const risk = productRisk(selectedProduct);
-    const duplicateMessages = duplicates
-      .filter((item) => item.productId === selectedProduct.id)
-      .map((item) => `Possible duplicate of ${item.duplicateOf}: ${item.reasons.join(", ")}`);
-    const blockingIssues = getBlockingIssues({ errors: risk.errors, duplicateMessages });
+    const blockingIssues = blockingIssuesFor(selectedProduct);
 
     if (blockingIssues.length > 0) {
       setNotice({ tone: "error", text: blockingIssues[0] });
@@ -145,6 +205,118 @@ export const App = () => {
       setNotice({ tone: response.ok ? "ok" : "warn", text: response.message });
     } catch (error: unknown) {
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "Could not fill the active tab." });
+    }
+  };
+
+  const autoPublishQueue = async () => {
+    if (readyProducts.length === 0) {
+      setNotice({ tone: "warn", text: "No Ready products are waiting in the queue." });
+      return;
+    }
+
+    setIsAutoPublishing(true);
+    let nextProducts = [...effectiveProducts];
+    let publishedCount = 0;
+    let draftedCount = 0;
+    let failedCount = 0;
+
+    try {
+      for (let index = 0; index < readyProducts.length; index += 1) {
+        const product = readyProducts[index];
+        const blockingIssues = blockingIssuesFor(product);
+
+        if (blockingIssues.length > 0) {
+          failedCount += 1;
+          nextProducts = nextProducts.map((item) =>
+            item.id === product.id ? { ...item, status: "Needs Fix", lastError: blockingIssues[0] } : item
+          );
+          setProducts(nextProducts);
+          await saveProducts(nextProducts);
+          continue;
+        }
+
+        setNotice({
+          tone: "ok",
+          text: `Auto publishing ${index + 1}/${readyProducts.length}: ${product.title || "Untitled product"}`
+        });
+
+        try {
+          const tab = await chrome.tabs.create({ url: marketplaceCreateUrl, active: true });
+          if (!tab.id) {
+            throw new Error("Could not open a Marketplace create tab.");
+          }
+
+          await waitForMarketplaceTab(tab.id);
+          await sleep(1200);
+
+          const response = await sendDraftToTab(tab.id, product, true);
+          const publishedTab = await chrome.tabs.get(tab.id);
+
+          nextProducts = nextProducts.map((item) => {
+            if (item.id !== product.id) {
+              return item;
+            }
+
+            if (response.published) {
+              publishedCount += 1;
+              return {
+                ...item,
+                status: "Published",
+                draftedAt: new Date().toISOString(),
+                publishedUrl: publishedTab.url,
+                marketplaceStatus: "Published",
+                lastError: undefined
+              };
+            }
+
+            if (response.missingFields.length === 1 && response.missingFields[0] === "publish") {
+              draftedCount += 1;
+              return {
+                ...item,
+                status: "Drafted",
+                draftedAt: new Date().toISOString(),
+                marketplaceStatus: "Drafted",
+                lastError: response.message
+              };
+            }
+
+            failedCount += 1;
+            return {
+              ...item,
+              status: "Needs Fix",
+              marketplaceStatus: "Needs Fix",
+              lastError: response.message
+            };
+          });
+
+          setProducts(nextProducts);
+          await saveProducts(nextProducts);
+
+          if (response.published) {
+            await chrome.tabs.remove(tab.id);
+          }
+        } catch (error: unknown) {
+          failedCount += 1;
+          const message = error instanceof Error ? error.message : "Auto publish failed.";
+          nextProducts = nextProducts.map((item) =>
+            item.id === product.id ? { ...item, status: "Needs Fix", marketplaceStatus: "Needs Fix", lastError: message } : item
+          );
+          setProducts(nextProducts);
+          await saveProducts(nextProducts);
+          setNotice({ tone: "warn", text: `${product.title || "Untitled product"}: ${message}` });
+        }
+
+        if (index < readyProducts.length - 1) {
+          await sleep(clampDelaySeconds(settings.autoPublishDelaySeconds) * 1000);
+        }
+      }
+
+      setNotice({
+        tone: failedCount > 0 ? "warn" : "ok",
+        text: `Auto publish finished. Published ${publishedCount}, drafted ${draftedCount}, failed ${failedCount}.`
+      });
+    } finally {
+      setIsAutoPublishing(false);
     }
   };
 
@@ -209,21 +381,40 @@ export const App = () => {
               onChange={(event) => updateSettings({ ...settings, defaultLocation: event.target.value })}
             />
           </label>
+          <label>
+            <span>Delay between uploads (seconds)</span>
+            <input
+              type="number"
+              min={0}
+              max={600}
+              value={settings.autoPublishDelaySeconds}
+              onChange={(event) =>
+                updateSettings({
+                  ...settings,
+                  autoPublishDelaySeconds: clampDelaySeconds(Number(event.target.value))
+                })
+              }
+            />
+          </label>
         </section>
       ) : null}
 
       <section className="actions">
-        <button className="primary" onClick={syncProducts} disabled={isSyncing}>
+        <button className="primary" onClick={syncProducts} disabled={isSyncing || isAutoPublishing}>
           <RefreshCw size={17} />
           {isSyncing ? "Syncing" : "Sync"}
         </button>
-        <button onClick={openMarketplaceCreate}>
+        <button onClick={openMarketplaceCreate} disabled={isAutoPublishing}>
           <Database size={17} />
           Create tab
         </button>
-        <button onClick={fillDraft} disabled={!selectedProduct}>
+        <button onClick={fillDraft} disabled={!selectedProduct || isAutoPublishing}>
           <FileInput size={17} />
-          Fill draft
+          Fill only
+        </button>
+        <button className="danger" onClick={autoPublishQueue} disabled={isSyncing || isAutoPublishing || readyProducts.length === 0}>
+          <Rocket size={17} />
+          {isAutoPublishing ? "Publishing" : "Auto publish"}
         </button>
       </section>
 

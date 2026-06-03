@@ -400,4 +400,49 @@ describe("fillMarketplaceDraft", () => {
     expect(result.missingFields).toEqual([]);
     expect(result.filledFields).toContain("category");
   });
+
+  it("publishes after filling when a next step and final publish button are available", async () => {
+    document.body.innerHTML = `
+      <label>Title<input name="title" /></label>
+      <label>Price<input name="price" /></label>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Location<input name="location" /></label>
+      <button type="button">\u05d4\u05d1\u05d0</button>
+    `;
+
+    document.querySelector("button")?.addEventListener("click", () => {
+      if (document.querySelector('[data-testid="publish-button"]')) {
+        return;
+      }
+
+      const publish = document.createElement("button");
+      publish.type = "button";
+      publish.dataset.testid = "publish-button";
+      publish.textContent = "\u05e4\u05e8\u05e1\u05dd";
+      publish.addEventListener("click", () => {
+        document.body.setAttribute("data-published", "true");
+      });
+      document.body.append(publish);
+    });
+
+    const result = await fillMarketplaceDraft(product, { fetchImage: undefined, publish: true });
+
+    expect(document.body.getAttribute("data-published")).toBe("true");
+    expect(result.missingFields).toEqual([]);
+    expect(result.published).toBe(true);
+  });
+
+  it("reports an unpublished result when auto publish cannot find a submit button", async () => {
+    document.body.innerHTML = `
+      <label>Title<input name="title" /></label>
+      <label>Price<input name="price" /></label>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Location<input name="location" /></label>
+    `;
+
+    const result = await fillMarketplaceDraft(product, { fetchImage: undefined, publish: true });
+
+    expect(result.published).toBe(false);
+    expect(result.missingFields).toContain("publish");
+  });
 });
