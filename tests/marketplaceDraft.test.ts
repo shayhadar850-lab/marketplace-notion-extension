@@ -122,6 +122,279 @@ describe("fillMarketplaceDraft", () => {
     expect(result.missingFields).toEqual([]);
   });
 
+  it("waits for a delayed photo input before attaching images", async () => {
+    document.body.innerHTML = `
+      <label>Title<input name="title" /></label>
+      <label>Price<input name="price" /></label>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Location<input name="location" /></label>
+      <button type="button">${he.addPhotos}</button>
+    `;
+    const file = new File([new Blob(["image"], { type: "image/jpeg" })], "dragon.jpg", { type: "image/jpeg" });
+
+    vi.stubGlobal(
+      "DataTransfer",
+      class {
+        files: File[] = [];
+        items = {
+          add: vi.fn((addedFile: File) => {
+            this.files.push(addedFile);
+          })
+        };
+      }
+    );
+
+    document.querySelector("button")?.addEventListener("click", () => {
+      setTimeout(() => {
+        const input = document.createElement("input");
+        input.type = "file";
+        Object.defineProperty(input, "files", { value: [], writable: true });
+        document.body.append(input);
+      }, 250);
+    });
+
+    const result = await fillMarketplaceDraft(product, {
+      fetchImage: vi.fn().mockResolvedValue(new Response(file))
+    });
+
+    expect(result.imageCount).toBe(1);
+    expect(result.missingFields).toEqual([]);
+  });
+
+  it("normalizes MakerWorld image metadata before attaching files", async () => {
+    document.body.innerHTML = `
+      <label>Title<input name="title" /></label>
+      <label>Price<input name="price" /></label>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Location<input name="location" /></label>
+      <input type="file" />
+    `;
+
+    const addedFiles: File[] = [];
+    vi.stubGlobal(
+      "DataTransfer",
+      class {
+        files: File[] = addedFiles;
+        items = {
+          add: vi.fn((addedFile: File) => {
+            addedFiles.push(addedFile);
+          })
+        };
+      }
+    );
+    Object.defineProperty(document.querySelector('input[type="file"]') as HTMLInputElement, "files", {
+      value: [],
+      writable: true
+    });
+
+    const result = await fillMarketplaceDraft(
+      {
+        ...product,
+        images: [
+          {
+            url: "https://makerworld.bblmw.com/makerworld/model/example/design/sample-photo.jpg",
+            name: "MakerWorld Image 1"
+          }
+        ]
+      },
+      {
+        fetchImage: vi.fn().mockResolvedValue(
+          new Response(new Blob(["image-bytes"]), {
+            status: 200,
+            headers: { "Content-Type": "application/octet-stream" }
+          })
+        )
+      }
+    );
+
+    expect(addedFiles).toHaveLength(1);
+    expect(addedFiles[0]?.name).toBe("MakerWorld Image 1.jpg");
+    expect(addedFiles[0]?.type).toBe("image/jpeg");
+    expect(result.imageCount).toBe(1);
+  });
+
+  it("skips unsupported gif files and still uploads supported images", async () => {
+    document.body.innerHTML = `
+      <label>Title<input name="title" /></label>
+      <label>Price<input name="price" /></label>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Location<input name="location" /></label>
+      <input type="file" />
+    `;
+
+    const addedFiles: File[] = [];
+    vi.stubGlobal(
+      "DataTransfer",
+      class {
+        files: File[] = addedFiles;
+        items = {
+          add: vi.fn((addedFile: File) => {
+            addedFiles.push(addedFile);
+          })
+        };
+      }
+    );
+    Object.defineProperty(document.querySelector('input[type="file"]') as HTMLInputElement, "files", {
+      value: [],
+      writable: true
+    });
+
+    const fetchImage = vi.fn().mockResolvedValue(new Response(new Blob(["jpg-bytes"], { type: "image/jpeg" }), { status: 200 }));
+
+    const result = await fillMarketplaceDraft(
+      {
+        ...product,
+        images: [
+          { url: "https://makerworld.bblmw.com/example/animated-preview.gif", name: "MakerWorld Image 1" },
+          { url: "https://makerworld.bblmw.com/example/product-photo.jpg", name: "MakerWorld Image 2" }
+        ]
+      },
+      {
+        fetchImage
+      }
+    );
+
+    expect(fetchImage).toHaveBeenCalledTimes(1);
+    expect(fetchImage).toHaveBeenCalledWith("https://makerworld.bblmw.com/example/product-photo.jpg");
+    expect(addedFiles).toHaveLength(1);
+    expect(addedFiles[0]?.name).toBe("MakerWorld Image 2.jpg");
+    expect(addedFiles[0]?.type).toBe("image/jpeg");
+    expect(result.imageCount).toBe(1);
+  });
+
+  it("waits for Facebook to acknowledge uploaded images before publishing", async () => {
+    document.body.innerHTML = `
+      <label>Title<input name="title" /></label>
+      <label>Price<input name="price" /></label>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Location<input name="location" /></label>
+      <div id="image-count">תמונות: 0 / 10</div>
+      <input type="file" />
+      <button type="button">פרסם</button>
+    `;
+
+    const addedFiles: File[] = [];
+    vi.stubGlobal(
+      "DataTransfer",
+      class {
+        files: File[] = addedFiles;
+        items = {
+          add: vi.fn((addedFile: File) => {
+            addedFiles.push(addedFile);
+          })
+        };
+      }
+    );
+
+    const uploadInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(uploadInput, "files", { value: [], writable: true });
+    uploadInput.addEventListener("change", () => {
+      setTimeout(() => {
+        const counter = document.getElementById("image-count");
+        if (counter) {
+          counter.textContent = "תמונות: 1 / 10";
+        }
+        document.body.setAttribute("data-images-ready", "true");
+      }, 350);
+    });
+
+    document.querySelector("button")?.addEventListener("click", () => {
+      if (document.body.getAttribute("data-images-ready") === "true") {
+        document.body.setAttribute("data-published", "true");
+        return;
+      }
+
+      document.body.setAttribute("data-premature-publish", "true");
+    });
+
+    const result = await fillMarketplaceDraft(product, {
+      fetchImage: vi.fn().mockResolvedValue(new Response(new Blob(["image"], { type: "image/jpeg" }), { status: 200 })),
+      publish: true
+    });
+
+    expect(document.body.getAttribute("data-premature-publish")).not.toBe("true");
+    expect(document.body.getAttribute("data-published")).toBe("true");
+    expect(result.published).toBe(true);
+  });
+
+  it("waits for all accepted images before clicking next and publish", async () => {
+    document.body.innerHTML = `
+      <label>Title<input name="title" /></label>
+      <label>Price<input name="price" /></label>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Location<input name="location" /></label>
+      <div id="image-count">תמונות: 0 / 10</div>
+      <input type="file" />
+      <button type="button">הבא</button>
+    `;
+
+    const addedFiles: File[] = [];
+    vi.stubGlobal(
+      "DataTransfer",
+      class {
+        files: File[] = addedFiles;
+        items = {
+          add: vi.fn((addedFile: File) => {
+            addedFiles.push(addedFile);
+          })
+        };
+      }
+    );
+
+    const uploadInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(uploadInput, "files", { value: [], writable: true });
+    uploadInput.addEventListener("change", () => {
+      setTimeout(() => {
+        const counter = document.getElementById("image-count");
+        if (counter) {
+          counter.textContent = "תמונות: 1 / 10";
+        }
+      }, 150);
+
+      setTimeout(() => {
+        const counter = document.getElementById("image-count");
+        if (counter) {
+          counter.textContent = "תמונות: 3 / 10";
+        }
+        document.body.setAttribute("data-images-ready", "true");
+      }, 450);
+    });
+
+    document.querySelector("button")?.addEventListener("click", () => {
+      if (document.body.getAttribute("data-images-ready") !== "true") {
+        document.body.setAttribute("data-premature-next", "true");
+        return;
+      }
+
+      const publish = document.createElement("button");
+      publish.type = "button";
+      publish.textContent = "פרסם";
+      publish.addEventListener("click", () => {
+        document.body.setAttribute("data-published", "true");
+      });
+      document.body.append(publish);
+    });
+
+    const result = await fillMarketplaceDraft(
+      {
+        ...product,
+        images: [
+          { url: "https://example.com/one.jpg", name: "one.jpg" },
+          { url: "https://example.com/two.jpg", name: "two.jpg" },
+          { url: "https://example.com/three.jpg", name: "three.jpg" }
+        ]
+      },
+      {
+        fetchImage: vi.fn().mockResolvedValue(new Response(new Blob(["image"], { type: "image/jpeg" }), { status: 200 })),
+        publish: true
+      }
+    );
+
+    expect(document.body.getAttribute("data-premature-next")).not.toBe("true");
+    expect(document.body.getAttribute("data-published")).toBe("true");
+    expect(result.published).toBe(true);
+  });
+
   it("fills Facebook-like aria and contenteditable fields", async () => {
     document.body.innerHTML = `
       <input aria-label="Title" />
@@ -300,6 +573,52 @@ describe("fillMarketplaceDraft", () => {
     expect(result.filledFields).not.toContain("condition");
   });
 
+  it("does not treat a non-clickable 'new' heading as a selected condition", async () => {
+    document.body.innerHTML = `
+      <input aria-label="Title" />
+      <input aria-label="Price" />
+      <div aria-label="Description" contenteditable="true"></div>
+      <button type="button" aria-haspopup="listbox">${he.category}</button>
+      <button type="button" aria-haspopup="listbox" aria-expanded="false">${he.condition}</button>
+    `;
+
+    const buttons = Array.from(document.querySelectorAll("button"));
+    buttons[0].addEventListener("click", () => {
+      const option = document.createElement("div");
+      option.setAttribute("role", "option");
+      option.textContent = he.homeDecor;
+      option.addEventListener("click", () => {
+        buttons[0].textContent = he.homeDecor;
+      });
+      document.body.append(option);
+    });
+    buttons[1].addEventListener("click", () => {
+      buttons[1].setAttribute("aria-expanded", "true");
+
+      const heading = document.createElement("div");
+      heading.textContent = he.new;
+      document.body.append(heading);
+
+      const option = document.createElement("div");
+      option.setAttribute("role", "option");
+      option.textContent = he.new;
+      option.addEventListener("click", () => {
+        buttons[1].textContent = he.new;
+        buttons[1].setAttribute("aria-expanded", "false");
+      });
+      document.body.append(option);
+    });
+
+    const result = await fillMarketplaceDraft(
+      { ...product, category: "Decor", condition: "New", location: "", images: [] },
+      { fetchImage: undefined }
+    );
+
+    expect(buttons[1].textContent).toContain(he.new);
+    expect(result.missingFields).toEqual([]);
+    expect(result.filledFields).toContain("condition");
+  });
+
   it("searches the Facebook category menu when category options are not visible yet", async () => {
     document.body.innerHTML = `
       <input aria-label="Title" />
@@ -444,5 +763,93 @@ describe("fillMarketplaceDraft", () => {
 
     expect(result.published).toBe(false);
     expect(result.missingFields).toContain("publish");
+  });
+
+  it("waits for Facebook draft fields to appear before filling", async () => {
+    document.body.innerHTML = `<div id="shell"></div>`;
+
+    setTimeout(() => {
+      document.body.innerHTML = `
+        <label>Title<input name="title" /></label>
+        <label>Price<input name="price" /></label>
+        <label>Description<textarea name="description"></textarea></label>
+        <label>Location<input name="location" /></label>
+      `;
+    }, 120);
+
+    const result = await fillMarketplaceDraft(product, { fetchImage: undefined });
+
+    expect((document.querySelector('input[name="title"]') as HTMLInputElement).value).toBe("Dragon phone stand");
+    expect(result.missingFields).toEqual([]);
+  });
+
+  it("waits for a delayed publish button after advancing to the next step", async () => {
+    document.body.innerHTML = `
+      <label>Title<input name="title" /></label>
+      <label>Price<input name="price" /></label>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Location<input name="location" /></label>
+      <button type="button">\u05d4\u05d1\u05d0</button>
+    `;
+
+    document.querySelector("button")?.addEventListener("click", () => {
+      setTimeout(() => {
+        const publish = document.createElement("button");
+        publish.type = "button";
+        publish.textContent = "\u05e4\u05e8\u05e1\u05dd";
+        publish.addEventListener("click", () => {
+          document.body.setAttribute("data-published", "true");
+        });
+        document.body.append(publish);
+      }, 700);
+    });
+
+    const result = await fillMarketplaceDraft(product, { fetchImage: undefined, publish: true });
+
+    expect(document.body.getAttribute("data-published")).toBe("true");
+    expect(result.published).toBe(true);
+  });
+
+  it("clicks the final publish button instead of other publish-related controls on the extra-places step", async () => {
+    document.body.innerHTML = `
+      <label>Title<input name="title" /></label>
+      <label>Price<input name="price" /></label>
+      <label>Description<textarea name="description"></textarea></label>
+      <label>Location<input name="location" /></label>
+      <button type="button">\u05d4\u05d1\u05d0</button>
+    `;
+
+    document.querySelector("button")?.addEventListener("click", () => {
+      const heading = document.createElement("div");
+      heading.textContent = "\u05e4\u05e8\u05e1\u05d5\u05dd \u05d1\u05de\u05e7\u05d5\u05de\u05d5\u05ea \u05e0\u05d5\u05e1\u05e4\u05d9\u05dd";
+      document.body.append(heading);
+
+      const publicOption = document.createElement("button");
+      publicOption.type = "button";
+      publicOption.textContent = "\u05e4\u05e8\u05e1\u05d5\u05dd \u05d1\u05d0\u05d5\u05e4\u05df \u05e6\u05d9\u05d1\u05d5\u05e8\u05d9";
+      publicOption.addEventListener("click", () => {
+        document.body.setAttribute("data-wrong-publish-clicked", "true");
+      });
+      document.body.append(publicOption);
+
+      const back = document.createElement("button");
+      back.type = "button";
+      back.textContent = "\u05d4\u05e7\u05d5\u05d3\u05dd";
+      document.body.append(back);
+
+      const publish = document.createElement("button");
+      publish.type = "button";
+      publish.textContent = "\u05e4\u05e8\u05e1\u05d5\u05dd";
+      publish.addEventListener("click", () => {
+        document.body.setAttribute("data-published", "true");
+      });
+      document.body.append(publish);
+    });
+
+    const result = await fillMarketplaceDraft(product, { fetchImage: undefined, publish: true });
+
+    expect(document.body.getAttribute("data-wrong-publish-clicked")).not.toBe("true");
+    expect(document.body.getAttribute("data-published")).toBe("true");
+    expect(result.published).toBe(true);
   });
 });

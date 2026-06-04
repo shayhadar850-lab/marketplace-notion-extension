@@ -186,6 +186,13 @@ input {
   color: #ffffff;
 }
 
+.action-hint {
+  margin: -4px 0 12px;
+  color: #7a5c18;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .status-tabs {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));

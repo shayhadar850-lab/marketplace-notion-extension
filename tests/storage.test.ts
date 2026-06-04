@@ -33,6 +33,10 @@ describe("extension storage", () => {
     const state = await loadState();
 
     expect(state.settings.autoPublishDelaySeconds).toBe(30);
+    expect(state.settings.formStepDelaySeconds).toBe(2);
+    expect(state.settings.activeMarketplaceAccountKey).toBe("");
+    expect(state.settings.activeMarketplaceAccountLabel).toBe("");
+    expect(state.settings.maxAutoPublishPerSession).toBe(5);
   });
 
   it("persists the auto publish delay in settings", async () => {
@@ -42,12 +46,20 @@ describe("extension storage", () => {
       defaultCurrency: "ILS",
       defaultLocation: "Tel Aviv",
       defaultCategory: "Home goods",
-      autoPublishDelaySeconds: 45
+      activeMarketplaceAccountKey: "statica statica",
+      activeMarketplaceAccountLabel: "Statica Statica",
+      autoPublishDelaySeconds: 45,
+      formStepDelaySeconds: 4,
+      maxAutoPublishPerSession: 7
     };
 
     await saveSettings(settings);
     const state = await loadState();
 
     expect(state.settings.autoPublishDelaySeconds).toBe(45);
+    expect(state.settings.formStepDelaySeconds).toBe(4);
+    expect(state.settings.activeMarketplaceAccountKey).toBe("statica statica");
+    expect(state.settings.activeMarketplaceAccountLabel).toBe("Statica Statica");
+    expect(state.settings.maxAutoPublishPerSession).toBe(7);
   });
 });

@@ -6,7 +6,11 @@ export type ExtensionSettings = {
   defaultCurrency: string;
   defaultLocation: string;
   defaultCategory: string;
+  activeMarketplaceAccountKey: string;
+  activeMarketplaceAccountLabel: string;
   autoPublishDelaySeconds: number;
+  formStepDelaySeconds: number;
+  maxAutoPublishPerSession: number;
 };
 
 export type StoredState = {
@@ -21,7 +25,11 @@ const defaultSettings: ExtensionSettings = {
   defaultCurrency: "ILS",
   defaultLocation: "",
   defaultCategory: "Home goods",
-  autoPublishDelaySeconds: 30
+  activeMarketplaceAccountKey: "",
+  activeMarketplaceAccountLabel: "",
+  autoPublishDelaySeconds: 30,
+  formStepDelaySeconds: 2,
+  maxAutoPublishPerSession: 5
 };
 
 const defaultState: StoredState = {

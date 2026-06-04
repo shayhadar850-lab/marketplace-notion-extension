@@ -29,6 +29,18 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
   return true;
 });
 
+const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+
+  return btoa(binary);
+};
+
 const downloadImage = async (message: DownloadImageMessage): Promise<DownloadImageResponse> => {
   const response = await fetch(message.url);
   if (!response.ok) {
@@ -39,11 +51,12 @@ const downloadImage = async (message: DownloadImageMessage): Promise<DownloadIma
   }
 
   const blob = await response.blob();
-  const bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
+  const mimeType = blob.type || response.headers.get("content-type") || "image/jpeg";
+  const base64 = arrayBufferToBase64(await blob.arrayBuffer());
 
   return {
     ok: true,
-    bytes,
-    mimeType: blob.type || response.headers.get("content-type") || "image/jpeg"
+    dataUrl: `data:${mimeType};base64,${base64}`,
+    mimeType
   };
 };

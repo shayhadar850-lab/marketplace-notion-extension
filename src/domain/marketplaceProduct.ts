@@ -5,9 +5,20 @@ export type MarketplaceImage = {
   name: string;
 };
 
+export type MarketplaceAccountUploadStatus = "Drafted" | "Published";
+
+export type MarketplaceAccountUpload = {
+  accountKey: string;
+  accountLabel: string;
+  status: MarketplaceAccountUploadStatus;
+  uploadedAt: string;
+  publishedUrl?: string;
+};
+
 export type MarketplaceProduct = {
   id: string;
   status: MarketplaceStatus;
+  sourceStatus?: MarketplaceStatus;
   title: string;
   description: string;
   price: number;
@@ -27,6 +38,7 @@ export type MarketplaceProduct = {
   publishedUrl?: string;
   marketplaceStatus?: string;
   lastError?: string;
+  accountUploads?: MarketplaceAccountUpload[];
 };
 
 export type ValidationResult = {

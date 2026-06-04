@@ -5,11 +5,13 @@ export type DraftResult = {
   missingFields: string[];
   imageCount: number;
   published: boolean;
+  imageDebug: string[];
 };
 
 type FillOptions = {
   fetchImage?: typeof fetch;
   publish?: boolean;
+  stepDelayMs?: number;
 };
 
 type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
@@ -68,6 +70,15 @@ const dropdownSearchMatchers = [
 
 const nextStepMatchers = ["next", "continue", "\u05d4\u05d1\u05d0", "\u05d4\u05de\u05e9\u05da"];
 const publishMatchers = ["publish", "post", "submit", "\u05e4\u05e8\u05e1\u05dd", "\u05e4\u05e8\u05e1\u05d5\u05dd"];
+const nonFinalPublishMatchers = [
+  "publicly",
+  "more places",
+  "groups",
+  "marketplace",
+  "\u05d1\u05d0\u05d5\u05e4\u05df \u05e6\u05d9\u05d1\u05d5\u05e8\u05d9",
+  "\u05d1\u05e7\u05d1\u05d5\u05e6\u05d5\u05ea",
+  "\u05d1\u05de\u05e7\u05d5\u05de\u05d5\u05ea \u05e0\u05d5\u05e1\u05e4\u05d9\u05dd"
+];
 
 const labelText = (element: Element): string => element.textContent?.toLocaleLowerCase().trim() ?? "";
 
@@ -212,6 +223,13 @@ const findDescriptionFallback = (): FillableElement | null => {
 };
 
 const waitForUiUpdate = () => new Promise<void>((resolve) => setTimeout(resolve, 75));
+const wait = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+const pace = async (milliseconds = 0): Promise<void> => {
+  const delay = Math.max(0, Math.min(10000, Math.round(milliseconds)));
+  if (delay > 0) {
+    await wait(delay);
+  }
+};
 
 const dispatchTrustedLikeClick = (element: HTMLElement) => {
   if (typeof PointerEvent !== "undefined") {
@@ -344,6 +362,16 @@ const findFieldAfterReveal = async (field: string): Promise<FillableElement | nu
   return findField(field);
 };
 
+const waitForDraftSurface = async (): Promise<void> => {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (findField("title") || findField("price") || findDropdownControl("category")) {
+      return;
+    }
+
+    await wait(150);
+  }
+};
+
 const findDropdownControl = (field: string): HTMLElement | null => {
   const matchers = fieldMatchers[field] ?? [field];
   const controls = Array.from(
@@ -383,19 +411,70 @@ const actionButtonText = (element: Element): string =>
     referencedText(element)
   ].join(" ");
 
-const findActionButton = (matchers: string[]): HTMLElement | null => {
+const actionButtonSignals = (element: Element): string[] =>
+  [
+    element.textContent ?? "",
+    element.getAttribute("aria-label") ?? "",
+    element.getAttribute("value") ?? "",
+    referencedText(element)
+  ]
+    .map((value) => normalize(value))
+    .filter(Boolean);
+
+type ActionButtonOptions = {
+  exactOnly?: boolean;
+  excludeMatchers?: string[];
+  maxSignalLength?: number;
+};
+
+const findActionButton = (matchers: string[], options: ActionButtonOptions = {}): HTMLElement | null => {
   const candidates = Array.from(
     document.querySelectorAll("button, [role='button'], input[type='button'], input[type='submit']")
   );
-  const matchingButton = candidates.find((element) => {
+  const matchingButtons = candidates.filter((element): element is HTMLElement => {
     if (!(element instanceof HTMLElement) || !isVisibleElement(element) || isDisabledElement(element)) {
       return false;
     }
 
-    return includesMatcher(actionButtonText(element), matchers);
+    const signals = actionButtonSignals(element);
+    if (signals.length === 0) {
+      return false;
+    }
+
+    if (options.excludeMatchers?.length && signals.some((signal) => includesMatcher(signal, options.excludeMatchers ?? []))) {
+      return false;
+    }
+
+    if (options.maxSignalLength && signals.every((signal) => signal.length > options.maxSignalLength!)) {
+      return false;
+    }
+
+    if (options.exactOnly) {
+      return signals.some((signal) => optionTextMatchesExactly(signal, matchers));
+    }
+
+    return signals.some((signal) => optionTextMatchesLoosely(signal, matchers));
   });
 
-  return matchingButton instanceof HTMLElement ? matchingButton : null;
+  if (matchingButtons.length === 0) {
+    return null;
+  }
+
+  matchingButtons.sort((left, right) => {
+    const leftSignals = actionButtonSignals(left);
+    const rightSignals = actionButtonSignals(right);
+    const leftExact = leftSignals.some((signal) => optionTextMatchesExactly(signal, matchers)) ? 0 : 1;
+    const rightExact = rightSignals.some((signal) => optionTextMatchesExactly(signal, matchers)) ? 0 : 1;
+    if (leftExact !== rightExact) {
+      return leftExact - rightExact;
+    }
+
+    const leftLength = Math.min(...leftSignals.map((signal) => signal.length));
+    const rightLength = Math.min(...rightSignals.map((signal) => signal.length));
+    return leftLength - rightLength;
+  });
+
+  return matchingButtons[0] ?? null;
 };
 
 const optionSelector = "[role='option'], [role='menuitem'], [role='radio'], [aria-selected], span, div";
@@ -413,15 +492,36 @@ const optionClickTarget = (element: HTMLElement): HTMLElement => {
   return actionable ?? element;
 };
 
+const optionPriority = (element: HTMLElement): number => {
+  if (element.matches("[role='option'], [role='menuitem'], [role='radio'], [aria-selected]")) {
+    return 0;
+  }
+
+  if (optionClickTarget(element) !== element) {
+    return 1;
+  }
+
+  return 2;
+};
+
 const findOption = (aliases: string[], excludedTexts: Set<string> = new Set()): HTMLElement | null => {
   const options = Array.from(document.querySelectorAll(optionSelector));
-  const visibleOptions = options.filter((element): element is HTMLElement => {
-    if (!(element instanceof HTMLElement) || !isVisibleElement(element)) {
-      return false;
-    }
+  const visibleOptions = options
+    .filter((element): element is HTMLElement => {
+      if (!(element instanceof HTMLElement) || !isVisibleElement(element)) {
+        return false;
+      }
 
-    return !excludedTexts.has(normalize(element.textContent));
-  });
+      return !excludedTexts.has(normalize(element.textContent));
+    })
+    .sort((left, right) => {
+      const priorityDelta = optionPriority(left) - optionPriority(right);
+      if (priorityDelta !== 0) {
+        return priorityDelta;
+      }
+
+      return normalize(left.textContent).length - normalize(right.textContent).length;
+    });
 
   const exactOption = visibleOptions.find((element) => optionTextMatchesExactly(element.textContent, aliases));
   if (exactOption) {
@@ -430,6 +530,60 @@ const findOption = (aliases: string[], excludedTexts: Set<string> = new Set()): 
 
   const looseOption = visibleOptions.find((element) => optionTextMatchesLoosely(element.textContent, aliases));
   return looseOption ? optionClickTarget(looseOption) : null;
+};
+
+const dropdownSelectionApplied = (control: HTMLElement, aliases: string[], initialText: string): boolean => {
+  const currentText = normalize(dropdownText(control));
+  if (currentText === initialText) {
+    return false;
+  }
+
+  if (!includesMatcher(currentText, aliases)) {
+    return false;
+  }
+
+  return control.getAttribute("aria-expanded") !== "true";
+};
+
+const selectDropdownValue = async (field: string, value: string, product?: MarketplaceProduct): Promise<DropdownSelection> => {
+  if (!value.trim()) {
+    return { attempted: false, selected: true };
+  }
+
+  const control = findDropdownControl(field);
+  if (!control) {
+    return { attempted: false, selected: false };
+  }
+
+  const aliases = optionAliases(field, value, product);
+  const initialControlText = normalize(dropdownText(control));
+  const clickedOptionTexts = new Set<string>();
+  const maxSelections = field === "category" ? 3 : 1;
+
+  for (const delay of [75, 150, 300]) {
+    dispatchTrustedLikeClick(control);
+    await new Promise<void>((resolve) => setTimeout(resolve, delay));
+
+    for (let selectionIndex = 0; selectionIndex < maxSelections; selectionIndex += 1) {
+      const option =
+        findOption(aliases, clickedOptionTexts) ??
+        (field === "category" ? await searchDropdownOptions(aliases, clickedOptionTexts) : null);
+      if (!option) {
+        break;
+      }
+
+      clickedOptionTexts.add(normalize(option.textContent));
+      option.scrollIntoView?.({ block: "center", inline: "nearest" });
+      dispatchTrustedLikeClick(option);
+      await waitForUiUpdate();
+
+      if (dropdownSelectionApplied(control, aliases, initialControlText)) {
+        return { attempted: true, selected: true };
+      }
+    }
+  }
+
+  return { attempted: true, selected: false };
 };
 
 const findDropdownSearchField = (): FillableElement | null => {
@@ -491,45 +645,6 @@ const dropdownText = (control: HTMLElement): string =>
     referencedText(control)
   ].join(" ");
 
-const selectDropdownValue = async (field: string, value: string, product?: MarketplaceProduct): Promise<DropdownSelection> => {
-  if (!value.trim()) {
-    return { attempted: false, selected: true };
-  }
-
-  const control = findDropdownControl(field);
-  if (!control) {
-    return { attempted: false, selected: false };
-  }
-
-  const aliases = optionAliases(field, value, product);
-  const clickedOptionTexts = new Set<string>();
-  const maxSelections = field === "category" ? 3 : 1;
-
-  for (const delay of [75, 150, 300]) {
-    dispatchTrustedLikeClick(control);
-    await new Promise<void>((resolve) => setTimeout(resolve, delay));
-
-    for (let selectionIndex = 0; selectionIndex < maxSelections; selectionIndex += 1) {
-      const option =
-        findOption(aliases, clickedOptionTexts) ??
-        (field === "category" ? await searchDropdownOptions(aliases, clickedOptionTexts) : null);
-      if (!option) {
-        break;
-      }
-
-      clickedOptionTexts.add(normalize(option.textContent));
-      option.scrollIntoView?.({ block: "center", inline: "nearest" });
-      dispatchTrustedLikeClick(option);
-      await waitForUiUpdate();
-
-      if (includesMatcher(dropdownText(control), aliases)) {
-        return { attempted: true, selected: true };
-      }
-    }
-  }
-
-  return { attempted: true, selected: false };
-};
 
 const setNativeValue = (element: FillableElement, value: string) => {
   if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLTextAreaElement)) {
@@ -573,16 +688,86 @@ const dropdownValues = (product: MarketplaceProduct): Record<string, string> => 
   condition: product.condition
 });
 
-const imageInput = (): HTMLInputElement | null => document.querySelector('input[type="file"]');
+let imageDebug: string[] = [];
 
-const revealImageInput = async (): Promise<HTMLInputElement | null> => {
-  const existingInput = imageInput();
-  if (existingInput) {
-    return existingInput;
+const addImageDebug = (message: string) => {
+  imageDebug.push(message);
+};
+
+const supportedUploadMimeTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+const extensionToMimeType: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp"
+};
+const mimeTypeToExtension: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp"
+};
+
+const sanitizeFileName = (value: string): string => value.replace(/[\\/:*?"<>|]+/g, "-").trim();
+
+const fileExtension = (value: string): string => {
+  const match = value.match(/\.([a-zA-Z0-9]+)(?:[?#].*)?$/);
+  return normalize(match?.[1] ?? "");
+};
+
+const inferMimeType = (name: string, url: string, fallbackMimeType: string): string => {
+  const normalizedMimeType = normalize(fallbackMimeType);
+  if (supportedUploadMimeTypes.has(normalizedMimeType)) {
+    return normalizedMimeType;
   }
 
-  const controls = Array.from(document.querySelectorAll("button, [role='button'], label, [aria-label]"));
-  const uploadControl = controls.find((element) => {
+  const extension = fileExtension(name) || fileExtension(url);
+  return extensionToMimeType[extension] ?? normalizedMimeType;
+};
+
+const isPotentiallySupportedImage = (name: string, url: string): boolean => {
+  const extension = fileExtension(name) || fileExtension(url);
+  if (!extension) {
+    return true;
+  }
+
+  return supportedUploadMimeTypes.has(extensionToMimeType[extension] ?? "");
+};
+
+const normalizedUploadName = (name: string, url: string, mimeType: string, index: number): string => {
+  const safeBaseName = sanitizeFileName(name) || sanitizeFileName(url.split("/").pop() ?? "") || `image-${index + 1}`;
+  if (fileExtension(safeBaseName)) {
+    return safeBaseName;
+  }
+
+  const extension = mimeTypeToExtension[mimeType];
+  return extension ? `${safeBaseName}.${extension}` : safeBaseName;
+};
+
+const imageInputs = (): HTMLInputElement[] => Array.from(document.querySelectorAll('input[type="file"]'));
+
+const describeImageInput = (input: HTMLInputElement): string =>
+  `accept=${input.getAttribute("accept") ?? ""}; multiple=${input.multiple}; name=${input.name || ""}`;
+
+const imageInput = (): HTMLInputElement | null => {
+  const inputs = imageInputs();
+  addImageDebug(`file inputs found: ${inputs.length}`);
+
+  const preferredInputs = inputs.filter((input) => {
+    const accept = normalize(input.getAttribute("accept"));
+    const name = normalize(input.getAttribute("name"));
+    const label = normalize(input.getAttribute("aria-label"));
+    return input.multiple || accept.includes("image") || name.includes("photo") || name.includes("image") || label.includes("photo") || label.includes("image");
+  });
+  const chosenInput = preferredInputs[preferredInputs.length - 1] ?? inputs[inputs.length - 1] ?? null;
+  if (chosenInput) {
+    addImageDebug(`chosen input: ${describeImageInput(chosenInput)}`);
+  }
+
+  return chosenInput;
+};
+
+const findUploadControls = (): HTMLElement[] =>
+  Array.from(document.querySelectorAll("button, [role='button'], label, [aria-label]")).filter((element): element is HTMLElement => {
     if (!(element instanceof HTMLElement) || !isVisibleElement(element)) {
       return false;
     }
@@ -597,40 +782,113 @@ const revealImageInput = async (): Promise<HTMLInputElement | null> => {
     return includesMatcher(text, imageUploadMatchers);
   });
 
-  if (uploadControl instanceof HTMLElement) {
+const revealImageInput = async (): Promise<HTMLInputElement | null> => {
+  const existingInput = imageInput();
+  if (existingInput) {
+    return existingInput;
+  }
+
+  const uploadControls = findUploadControls();
+  addImageDebug(`upload controls found: ${uploadControls.length}`);
+  for (const uploadControl of uploadControls) {
+    addImageDebug(`click upload control: ${(uploadControl.textContent ?? uploadControl.getAttribute("aria-label") ?? "").trim().slice(0, 40)}`);
     dispatchTrustedLikeClick(uploadControl);
-    await waitForUiUpdate();
+
+    for (const delay of [75, 150, 300, 600, 1000]) {
+      await wait(delay);
+      const revealedInput = imageInput();
+      if (revealedInput) {
+        return revealedInput;
+      }
+    }
   }
 
   return imageInput();
 };
 
+const uploadCountText = (): string => {
+  const body = document.body;
+  return body.innerText || body.textContent || "";
+};
+
+const readUploadedImageCount = (): number | null => {
+  const counts = Array.from(uploadCountText().matchAll(/(\d+)\s*\/\s*(\d+)/g))
+    .map((match) => ({ current: Number(match[1]), total: Number(match[2]) }))
+    .filter((match) => Number.isFinite(match.current) && Number.isFinite(match.total) && match.total >= 2 && match.total <= 20);
+
+  if (counts.length === 0) {
+    return null;
+  }
+
+  return Math.max(...counts.map((match) => match.current));
+};
+
+const waitForImageAcceptance = async (expectedCount: number): Promise<void> => {
+  const initialCount = readUploadedImageCount();
+  addImageDebug(`initial FB image counter: ${initialCount ?? "not found"}`);
+  if (initialCount === null) {
+    await wait(2500);
+    return;
+  }
+
+  for (const delay of [250, 250, 500, 500, 1000, 1000, 1500, 2000, 2500, 3000]) {
+    await wait(delay);
+
+    const nextCount = readUploadedImageCount();
+    addImageDebug(`FB image counter after wait: ${nextCount ?? "not found"}`);
+    if (nextCount !== null && nextCount >= expectedCount) {
+      return;
+    }
+  }
+};
+
 const attachImages = async (product: MarketplaceProduct, fetchImage?: typeof fetch): Promise<number> => {
+  imageDebug = [];
+  addImageDebug(`product images: ${product.images.length}`);
+
   const input = await revealImageInput();
   if (!input || !fetchImage || product.images.length === 0) {
+    addImageDebug(`blocked before download: input=${Boolean(input)}, fetch=${Boolean(fetchImage)}, images=${product.images.length}`);
     return 0;
   }
 
   if (typeof DataTransfer === "undefined") {
+    addImageDebug("DataTransfer is unavailable.");
     return 0;
   }
 
   const transfer = new DataTransfer();
+  const candidateImages = product.images
+    .filter((image) => isPotentiallySupportedImage(image.name, image.url))
+    .slice(0, 10);
+  addImageDebug(`candidate images after filter: ${candidateImages.length}`);
 
-  for (const image of product.images) {
+  for (const [index, image] of candidateImages.entries()) {
     try {
+      addImageDebug(`download ${index + 1}: ${image.url.slice(0, 90)}`);
       const response = await fetchImage(image.url);
       if (!response.ok) {
+        addImageDebug(`download failed ${index + 1}: ${response.status}`);
         continue;
       }
 
       const blob = await response.blob();
-      transfer.items.add(new File([blob], image.name, { type: blob.type || "image/jpeg" }));
+      const mimeType = inferMimeType(image.name, image.url, blob.type || response.headers.get("content-type") || "");
+      if (!supportedUploadMimeTypes.has(mimeType)) {
+        addImageDebug(`unsupported mime ${index + 1}: ${mimeType || "unknown"}`);
+        continue;
+      }
+
+      const fileName = normalizedUploadName(image.name, image.url, mimeType, index);
+      transfer.items.add(new File([blob], fileName, { type: mimeType }));
+      addImageDebug(`added file ${index + 1}: ${fileName}; ${mimeType}; ${blob.size} bytes`);
     } catch {
+      addImageDebug(`download threw ${index + 1}`);
       continue;
     }
   }
 
+  addImageDebug(`transfer files: ${transfer.files.length}`);
   if (transfer.files.length === 0) {
     return 0;
   }
@@ -638,43 +896,105 @@ const attachImages = async (product: MarketplaceProduct, fetchImage?: typeof fet
   try {
     input.files = transfer.files;
   } catch {
+    addImageDebug("setting input.files failed.");
     return 0;
   }
 
+  addImageDebug(`input.files after set: ${input.files?.length ?? 0}`);
   input.dispatchEvent(new Event("input", { bubbles: true }));
   input.dispatchEvent(new Event("change", { bubbles: true }));
+  await waitForUiUpdate();
+  await waitForImageAcceptance(transfer.files.length);
   return transfer.files.length;
 };
 
-const publishMarketplaceDraft = async (): Promise<boolean> => {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const publishButton = findActionButton(publishMatchers);
+const waitForActionButton = async (matchers: string[], timeoutMs: number): Promise<HTMLElement | null> => {
+  const actionCandidates = document.querySelectorAll("button, [role='button'], input[type='button'], input[type='submit']");
+  if (actionCandidates.length === 0) {
+    return null;
+  }
+
+  const startedAt = Date.now();
+
+  do {
+    const button = findActionButton(matchers);
+    if (button) {
+      return button;
+    }
+
+    await wait(500);
+  } while (Date.now() - startedAt < timeoutMs);
+
+  return null;
+};
+
+const findPublishButton = (): HTMLElement | null =>
+  findActionButton(publishMatchers, {
+    exactOnly: true,
+    excludeMatchers: nonFinalPublishMatchers,
+    maxSignalLength: 24
+  }) ??
+  findActionButton(publishMatchers, {
+    excludeMatchers: nonFinalPublishMatchers,
+    maxSignalLength: 16
+  });
+
+const waitForPublishButton = async (timeoutMs: number): Promise<HTMLElement | null> => {
+  const actionCandidates = document.querySelectorAll("button, [role='button'], input[type='button'], input[type='submit']");
+  if (actionCandidates.length === 0) {
+    return null;
+  }
+
+  const startedAt = Date.now();
+
+  do {
+    const button = findPublishButton();
+    if (button) {
+      return button;
+    }
+
+    await wait(500);
+  } while (Date.now() - startedAt < timeoutMs);
+
+  return null;
+};
+
+const publishMarketplaceDraft = async (stepDelayMs = 0): Promise<boolean> => {
+  const nextButton =
+    findActionButton(nextStepMatchers, { exactOnly: true, maxSignalLength: 16 }) ??
+    (findPublishButton() ? null : await waitForActionButton(nextStepMatchers, 30000));
+  if (nextButton) {
+    await pace(stepDelayMs);
+    dispatchTrustedLikeClick(nextButton);
+    await wait(1200);
+
+    const publishButton = await waitForPublishButton(45000);
     if (publishButton) {
+      await pace(stepDelayMs);
       dispatchTrustedLikeClick(publishButton);
-      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      await wait(1000);
       return true;
     }
 
-    const nextButton = findActionButton(nextStepMatchers);
-    if (!nextButton) {
-      break;
-    }
-
-    dispatchTrustedLikeClick(nextButton);
-    await new Promise<void>((resolve) => setTimeout(resolve, 350));
+    return false;
   }
 
-  const publishButton = findActionButton(publishMatchers);
+  const publishButton = findPublishButton() ?? (await waitForPublishButton(10000));
   if (!publishButton) {
     return false;
   }
 
+  await pace(stepDelayMs);
   dispatchTrustedLikeClick(publishButton);
-  await new Promise<void>((resolve) => setTimeout(resolve, 250));
+  await wait(1000);
   return true;
 };
 
 export const fillMarketplaceDraft = async (product: MarketplaceProduct, options: FillOptions = {}): Promise<DraftResult> => {
+  imageDebug = [];
+  await waitForDraftSurface();
+  const stepDelayMs = options.stepDelayMs ?? 0;
+
   const filledFields: string[] = [];
   const missingFields: string[] = [];
   const values = fieldValues(product);
@@ -692,6 +1012,7 @@ export const fillMarketplaceDraft = async (product: MarketplaceProduct, options:
 
     setNativeValue(element, value);
     filledFields.push(field);
+    await pace(stepDelayMs);
   }
 
   for (const [field, value] of Object.entries(dropdownValues(product))) {
@@ -707,9 +1028,11 @@ export const fillMarketplaceDraft = async (product: MarketplaceProduct, options:
 
     if (selected.selected) {
       filledFields.push(field);
+      await pace(stepDelayMs);
     }
   }
 
+  await pace(stepDelayMs);
   const imageCount = await attachImages(product, options.fetchImage);
   if (options.fetchImage && product.images.length > 0 && imageCount === 0) {
     missingFields.push("images");
@@ -717,7 +1040,7 @@ export const fillMarketplaceDraft = async (product: MarketplaceProduct, options:
 
   let published = false;
   if (options.publish && missingFields.length === 0) {
-    published = await publishMarketplaceDraft();
+    published = await publishMarketplaceDraft(stepDelayMs);
     if (!published) {
       missingFields.push("publish");
     }
@@ -727,6 +1050,7 @@ export const fillMarketplaceDraft = async (product: MarketplaceProduct, options:
     filledFields,
     missingFields,
     imageCount,
-    published
+    published,
+    imageDebug
   };
 };

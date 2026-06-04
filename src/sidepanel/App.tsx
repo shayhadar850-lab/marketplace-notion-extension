@@ -1,9 +1,17 @@
 import { AlertTriangle, CheckCircle2, Database, FileInput, RefreshCw, Rocket, Settings, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { clampSessionLimit, limitAutoPublishProducts } from "../domain/autoPublishSession";
+import {
+  hasAccountUpload,
+  normalizeMarketplaceAccountKey,
+  recordAccountUpload,
+  resolveMarketplaceStatus,
+  type MarketplaceAccount
+} from "../domain/accountUploads";
 import { applyMarketplaceDefaults, getBlockingIssues } from "../domain/productDefaults";
 import type { MarketplaceProduct, MarketplaceStatus } from "../domain/marketplaceProduct";
 import { findDuplicateProducts, validateMarketplaceProduct } from "../domain/productValidation";
-import type { FillDraftMessage, FillDraftResponse } from "../extension/messages";
+import type { FillDraftMessage, FillDraftResponse, MarketplaceAccountResponse } from "../extension/messages";
 import { loadState, saveActiveStatus, saveProducts, saveSettings, type ExtensionSettings } from "../extension/storage";
 import { queryNotionProducts } from "../notion/notionAdapter";
 
@@ -26,7 +34,24 @@ const clampDelaySeconds = (value: number) => {
   return Math.max(0, Math.min(600, Math.round(value)));
 };
 
+const clampStepDelaySeconds = (value: number) => {
+  if (!Number.isFinite(value)) {
+    return 2;
+  }
+
+  return Math.max(0, Math.min(10, Math.round(value)));
+};
+
 const statusClass = (status: MarketplaceStatus) => status.toLowerCase().replace(/\s+/g, "-");
+
+const responseNoticeText = (response: FillDraftResponse): string => {
+  const imageDebug = response.imageDebug?.slice(0, 10).join(" | ");
+  if (!imageDebug || response.imageCount > 0) {
+    return response.message;
+  }
+
+  return `${response.message}. Image debug: ${imageDebug}`;
+};
 
 const maskedToken = (token: string) => {
   if (!token) {
@@ -34,6 +59,43 @@ const maskedToken = (token: string) => {
   }
 
   return `${token.slice(0, 4)}...${token.slice(-4)}`;
+};
+
+const accountLabel = (settings: ExtensionSettings): string =>
+  settings.activeMarketplaceAccountLabel || "No Marketplace account detected yet";
+
+const detectMarketplaceAccountInTab = async (tabId: number): Promise<MarketplaceAccount> => {
+  let response: MarketplaceAccountResponse;
+  try {
+    response = (await chrome.tabs.sendMessage(tabId, {
+      type: "GET_MARKETPLACE_ACCOUNT"
+    })) as MarketplaceAccountResponse;
+  } catch {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content-script.js"] });
+    response = (await chrome.tabs.sendMessage(tabId, {
+      type: "GET_MARKETPLACE_ACCOUNT"
+    })) as MarketplaceAccountResponse;
+  }
+
+  if (!response.ok || !response.accountLabel) {
+    throw new Error(response.message ?? "Could not detect the active Marketplace account.");
+  }
+
+  return {
+    key: response.accountKey || normalizeMarketplaceAccountKey(response.accountLabel),
+    label: response.accountLabel
+  };
+};
+
+const rememberMarketplaceAccount = async (settings: ExtensionSettings, account: MarketplaceAccount) => {
+  const nextSettings: ExtensionSettings = {
+    ...settings,
+    activeMarketplaceAccountKey: account.key,
+    activeMarketplaceAccountLabel: account.label
+  };
+
+  await saveSettings(nextSettings);
+  return nextSettings;
 };
 
 const openMarketplaceCreate = async () => {
@@ -71,14 +133,15 @@ const waitForMarketplaceTab = async (tabId: number): Promise<void> => {
 const sendDraftToTab = async (
   tabId: number,
   product: MarketplaceProduct,
-  publish = false
+  publish = false,
+  stepDelayMs = 0
 ): Promise<FillDraftResponse> => {
   const tab = await chrome.tabs.get(tabId);
   if (!tab.url?.startsWith("https://www.facebook.com/marketplace/")) {
     throw new Error("Open a Facebook Marketplace create listing tab first.");
   }
 
-  const message: FillDraftMessage = { type: "FILL_MARKETPLACE_DRAFT", product, publish };
+  const message: FillDraftMessage = { type: "FILL_MARKETPLACE_DRAFT", product, publish, stepDelayMs };
 
   try {
     return await chrome.tabs.sendMessage(tabId, message);
@@ -88,14 +151,14 @@ const sendDraftToTab = async (
   }
 };
 
-const sendDraftToActiveTab = async (product: MarketplaceProduct): Promise<FillDraftResponse> => {
+const sendDraftToActiveTab = async (product: MarketplaceProduct, stepDelayMs = 0): Promise<FillDraftResponse> => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
   if (!tab?.id || !tab.url?.startsWith("https://www.facebook.com/marketplace/")) {
     throw new Error("Open a Facebook Marketplace create listing tab first.");
   }
 
-  return sendDraftToTab(tab.id, product, false);
+  return sendDraftToTab(tab.id, product, false, stepDelayMs);
 };
 
 const productRisk = (product: MarketplaceProduct) => validateMarketplaceProduct(product);
@@ -107,7 +170,11 @@ export const App = () => {
     defaultCurrency: "ILS",
     defaultLocation: "",
     defaultCategory: "Home goods",
-    autoPublishDelaySeconds: 30
+    activeMarketplaceAccountKey: "",
+    activeMarketplaceAccountLabel: "",
+    autoPublishDelaySeconds: 30,
+    formStepDelaySeconds: 2,
+    maxAutoPublishPerSession: 5
   });
   const [products, setProducts] = useState<MarketplaceProduct[]>([]);
   const [activeStatus, setActiveStatus] = useState<MarketplaceStatus | "All">("Ready");
@@ -131,7 +198,14 @@ export const App = () => {
   }, []);
 
   const effectiveProducts = useMemo(
-    () => products.map((product) => applyMarketplaceDefaults(product, settings)),
+    () =>
+      products.map((product) => {
+        const withDefaults = applyMarketplaceDefaults(product, settings);
+        return {
+          ...withDefaults,
+          status: resolveMarketplaceStatus(withDefaults, settings.activeMarketplaceAccountKey)
+        };
+      }),
     [products, settings]
   );
   const duplicates = useMemo(() => findDuplicateProducts(effectiveProducts), [effectiveProducts]);
@@ -142,12 +216,27 @@ export const App = () => {
   const selectedProduct = effectiveProducts.find((product) => product.id === selectedId) ?? filteredProducts[0];
   const selectedRisk = selectedProduct ? productRisk(selectedProduct) : undefined;
   const readyProducts = effectiveProducts.filter((product) => product.status === "Ready");
+  const sessionProducts = useMemo(
+    () => limitAutoPublishProducts(effectiveProducts, settings.maxAutoPublishPerSession),
+    [effectiveProducts, settings.maxAutoPublishPerSession]
+  );
+  const autoPublishDisabledReason = isSyncing
+    ? "Sync is still running."
+    : isAutoPublishing
+      ? "Auto publish is already running."
+      : sessionProducts.length === 0
+        ? "Sync first and make sure at least one product is in Ready status."
+        : "";
 
   const blockingIssuesFor = (product: MarketplaceProduct) => {
     const risk = productRisk(product);
     const duplicateMessages = duplicates
       .filter((item) => item.productId === product.id)
       .map((item) => `Possible duplicate of ${item.duplicateOf}: ${item.reasons.join(", ")}`);
+
+    if (hasAccountUpload(product, settings.activeMarketplaceAccountKey)) {
+      duplicateMessages.unshift(`Already uploaded in Marketplace account ${settings.activeMarketplaceAccountLabel || "this account"}.`);
+    }
 
     return getBlockingIssues({ errors: risk.errors, duplicateMessages });
   };
@@ -201,28 +290,46 @@ export const App = () => {
     }
 
     try {
-      const response = await sendDraftToActiveTab(selectedProduct);
-      setNotice({ tone: response.ok ? "ok" : "warn", text: response.message });
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) {
+        throw new Error("Open a Facebook Marketplace create listing tab first.");
+      }
+
+      const detectedAccount = await detectMarketplaceAccountInTab(tab.id);
+      const nextSettings = await rememberMarketplaceAccount(settings, detectedAccount);
+      setSettings(nextSettings);
+
+      if (hasAccountUpload(selectedProduct, detectedAccount.key)) {
+        setNotice({ tone: "warn", text: `${selectedProduct.title || "Untitled product"} was already uploaded in ${detectedAccount.label}.` });
+        return;
+      }
+
+      const response = await sendDraftToActiveTab(
+        selectedProduct,
+        clampStepDelaySeconds(nextSettings.formStepDelaySeconds) * 1000
+      );
+      setNotice({ tone: response.ok ? "ok" : "warn", text: responseNoticeText(response) });
     } catch (error: unknown) {
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "Could not fill the active tab." });
     }
   };
 
   const autoPublishQueue = async () => {
-    if (readyProducts.length === 0) {
+    if (sessionProducts.length === 0) {
       setNotice({ tone: "warn", text: "No Ready products are waiting in the queue." });
       return;
     }
 
     setIsAutoPublishing(true);
-    let nextProducts = [...effectiveProducts];
+    let nextProducts = [...products];
     let publishedCount = 0;
     let draftedCount = 0;
     let failedCount = 0;
+    let skippedCount = 0;
 
     try {
-      for (let index = 0; index < readyProducts.length; index += 1) {
-        const product = readyProducts[index];
+      for (let index = 0; index < sessionProducts.length; index += 1) {
+        const product = sessionProducts[index];
         const blockingIssues = blockingIssuesFor(product);
 
         if (blockingIssues.length > 0) {
@@ -237,7 +344,7 @@ export const App = () => {
 
         setNotice({
           tone: "ok",
-          text: `Auto publishing ${index + 1}/${readyProducts.length}: ${product.title || "Untitled product"}`
+          text: `Auto publishing ${index + 1}/${sessionProducts.length}: ${product.title || "Untitled product"}`
         });
 
         try {
@@ -249,7 +356,31 @@ export const App = () => {
           await waitForMarketplaceTab(tab.id);
           await sleep(1200);
 
-          const response = await sendDraftToTab(tab.id, product, true);
+          const detectedAccount = await detectMarketplaceAccountInTab(tab.id);
+          const nextSettingsState = await rememberMarketplaceAccount(settings, detectedAccount);
+          setSettings(nextSettingsState);
+
+          if (hasAccountUpload(product, detectedAccount.key)) {
+            skippedCount += 1;
+            nextProducts = nextProducts.map((item) =>
+              item.id === product.id
+                ? {
+                    ...item,
+                    lastError: `Skipped: already uploaded in ${detectedAccount.label}.`
+                  }
+                : item
+            );
+            setProducts(nextProducts);
+            await saveProducts(nextProducts);
+            continue;
+          }
+
+          const response = await sendDraftToTab(
+            tab.id,
+            product,
+            true,
+            clampStepDelaySeconds(nextSettingsState.formStepDelaySeconds) * 1000
+          );
           const publishedTab = await chrome.tabs.get(tab.id);
 
           nextProducts = nextProducts.map((item) => {
@@ -259,25 +390,32 @@ export const App = () => {
 
             if (response.published) {
               publishedCount += 1;
-              return {
-                ...item,
-                status: "Published",
-                draftedAt: new Date().toISOString(),
-                publishedUrl: publishedTab.url,
-                marketplaceStatus: "Published",
-                lastError: undefined
-              };
+              return recordAccountUpload(
+                {
+                  ...item,
+                  draftedAt: new Date().toISOString(),
+                  publishedUrl: publishedTab.url,
+                  marketplaceStatus: "Published",
+                  lastError: undefined
+                },
+                detectedAccount,
+                "Published",
+                publishedTab.url
+              );
             }
 
             if (response.missingFields.length === 1 && response.missingFields[0] === "publish") {
               draftedCount += 1;
-              return {
-                ...item,
-                status: "Drafted",
-                draftedAt: new Date().toISOString(),
-                marketplaceStatus: "Drafted",
-                lastError: response.message
-              };
+              return recordAccountUpload(
+                {
+                  ...item,
+                  draftedAt: new Date().toISOString(),
+                  marketplaceStatus: "Drafted",
+                  lastError: responseNoticeText(response)
+                },
+                detectedAccount,
+                "Drafted"
+              );
             }
 
             failedCount += 1;
@@ -285,7 +423,7 @@ export const App = () => {
               ...item,
               status: "Needs Fix",
               marketplaceStatus: "Needs Fix",
-              lastError: response.message
+              lastError: responseNoticeText(response)
             };
           });
 
@@ -293,7 +431,10 @@ export const App = () => {
           await saveProducts(nextProducts);
 
           if (response.published) {
-            await chrome.tabs.remove(tab.id);
+            setNotice({
+              tone: "ok",
+              text: `${product.title || "Untitled product"}: Publish clicked. Keeping the tab open so Facebook can finish processing.`
+            });
           }
         } catch (error: unknown) {
           failedCount += 1;
@@ -306,14 +447,14 @@ export const App = () => {
           setNotice({ tone: "warn", text: `${product.title || "Untitled product"}: ${message}` });
         }
 
-        if (index < readyProducts.length - 1) {
+        if (index < sessionProducts.length - 1) {
           await sleep(clampDelaySeconds(settings.autoPublishDelaySeconds) * 1000);
         }
       }
 
       setNotice({
         tone: failedCount > 0 ? "warn" : "ok",
-        text: `Auto publish finished. Published ${publishedCount}, drafted ${draftedCount}, failed ${failedCount}.`
+        text: `Auto publish finished. Processed ${sessionProducts.length} products: published ${publishedCount}, drafted ${draftedCount}, skipped ${skippedCount}, failed ${failedCount}.`
       });
     } finally {
       setIsAutoPublishing(false);
@@ -382,6 +523,10 @@ export const App = () => {
             />
           </label>
           <label>
+            <span>Active Marketplace account</span>
+            <input value={accountLabel(settings)} readOnly />
+          </label>
+          <label>
             <span>Delay between uploads (seconds)</span>
             <input
               type="number"
@@ -392,6 +537,36 @@ export const App = () => {
                 updateSettings({
                   ...settings,
                   autoPublishDelaySeconds: clampDelaySeconds(Number(event.target.value))
+                })
+              }
+            />
+          </label>
+          <label>
+            <span>Delay between form actions (seconds)</span>
+            <input
+              type="number"
+              min={0}
+              max={10}
+              value={settings.formStepDelaySeconds}
+              onChange={(event) =>
+                updateSettings({
+                  ...settings,
+                  formStepDelaySeconds: clampStepDelaySeconds(Number(event.target.value))
+                })
+              }
+            />
+          </label>
+          <label>
+            <span>Max products per session</span>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={settings.maxAutoPublishPerSession}
+              onChange={(event) =>
+                updateSettings({
+                  ...settings,
+                  maxAutoPublishPerSession: clampSessionLimit(Number(event.target.value))
                 })
               }
             />
@@ -412,11 +587,17 @@ export const App = () => {
           <FileInput size={17} />
           Fill only
         </button>
-        <button className="danger" onClick={autoPublishQueue} disabled={isSyncing || isAutoPublishing || readyProducts.length === 0}>
+        <button
+          className="danger"
+          onClick={autoPublishQueue}
+          disabled={isSyncing || isAutoPublishing || sessionProducts.length === 0}
+          title={autoPublishDisabledReason}
+        >
           <Rocket size={17} />
           {isAutoPublishing ? "Publishing" : "Auto publish"}
         </button>
       </section>
+      {autoPublishDisabledReason ? <p className="action-hint">{autoPublishDisabledReason}</p> : null}
 
       <nav className="status-tabs" aria-label="Product status">
         {statuses.map((status) => (

@@ -24,8 +24,8 @@ const notionPage = (id: string, title: string) => ({
 const makerWorldPage = {
   id: "maker-page-1",
   properties: {
-    "Workflow Stage": { status: { name: "Ready" } },
-    "Approved for Posting": { checkbox: true },
+    "Workflow Stage": { status: { name: "Scraped" } },
+    "Approved for Posting": { checkbox: false },
     "Model Name": { title: [{ plain_text: "Parametric cable clip" }] },
     "תיאור המוצר": { rich_text: [{ plain_text: "A useful 3D printed cable clip for desk organization." }] },
     Price: { number: 25 },
@@ -82,6 +82,21 @@ describe("queryNotionProducts", () => {
       sku: "https://makerworld.com/model/123"
     });
     expect(products[0].images).toEqual([{ name: "clip.jpg", url: "https://cdn.example.com/clip.jpg" }]);
+  });
+
+  it("treats Scraped MakerWorld items as Ready for Marketplace publishing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [makerWorldPage], has_more: false })
+    });
+
+    const products = await queryNotionProducts({
+      token: "ntn_test",
+      databaseId: "data-source-id",
+      fetcher
+    });
+
+    expect(products[0].status).toBe("Ready");
   });
 
   it("uses a bound default fetcher in browser contexts", async () => {

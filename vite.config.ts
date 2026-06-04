@@ -1,9 +1,26 @@
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
+import type { Plugin } from "vite";
 import { defineConfig } from "vite";
 
+const wrapContentScript = (): Plugin => ({
+  name: "wrap-content-script",
+  generateBundle(_options, bundle) {
+    const chunk = bundle["content-script.js"];
+    if (chunk?.type !== "chunk") {
+      return;
+    }
+
+    chunk.code = [
+      "(() => {",
+      chunk.code,
+      "})();"
+    ].join("\n");
+  }
+});
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), wrapContentScript()],
   build: {
     outDir: "dist",
     emptyOutDir: true,

@@ -107,6 +107,10 @@ const mapStatus = (properties: Record<string, NotionProperty | undefined>): Mark
     return status;
   }
 
+  if (status === "Scraped" || status === "Imported") {
+    return "Ready";
+  }
+
   if (readCheckbox(properties["Approved for Posting"])) {
     return "Ready";
   }
@@ -134,6 +138,7 @@ const mapPageToProduct = (page: NotionPage): MarketplaceProduct => {
   return {
     id: page.id,
     status,
+    sourceStatus: status,
     title: firstText(properties, ["Title", "Model Name", "Headlines"]),
     description: firstText(properties, ["Description", "תיאור המוצר", "Social Copy (IG/TikTok)"]),
     price: readNumber(properties.Price),
