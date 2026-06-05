@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle2, Database, FileInput, RefreshCw, Rocket, Se
 import { useEffect, useMemo, useState } from "react";
 import { clampSessionLimit, limitAutoPublishProducts } from "../domain/autoPublishSession";
 import {
+  findAccountUpload,
   hasAccountUpload,
   normalizeMarketplaceAccountKey,
   recordAccountUpload,
@@ -12,7 +13,14 @@ import { applyMarketplaceDefaults, getBlockingIssues } from "../domain/productDe
 import type { MarketplaceProduct, MarketplaceStatus } from "../domain/marketplaceProduct";
 import { findDuplicateProducts, validateMarketplaceProduct } from "../domain/productValidation";
 import type { FillDraftMessage, FillDraftResponse, MarketplaceAccountResponse } from "../extension/messages";
-import { loadState, saveActiveStatus, saveProducts, saveSettings, type ExtensionSettings } from "../extension/storage";
+import {
+  loadState,
+  saveActiveStatus,
+  saveProducts,
+  saveSelectedAutoPublishIds,
+  saveSettings,
+  type ExtensionSettings
+} from "../extension/storage";
 import { queryNotionProducts } from "../notion/notionAdapter";
 
 type Notice = {
@@ -63,6 +71,9 @@ const maskedToken = (token: string) => {
 
 const accountLabel = (settings: ExtensionSettings): string =>
   settings.activeMarketplaceAccountLabel || "No Marketplace account detected yet";
+
+const uploadStatusLabel = (status: "Drafted" | "Published"): string =>
+  status === "Published" ? "Exists here" : "Drafted here";
 
 const detectMarketplaceAccountInTab = async (tabId: number): Promise<MarketplaceAccount> => {
   let response: MarketplaceAccountResponse;
@@ -178,6 +189,7 @@ export const App = () => {
   });
   const [products, setProducts] = useState<MarketplaceProduct[]>([]);
   const [activeStatus, setActiveStatus] = useState<MarketplaceStatus | "All">("Ready");
+  const [selectedAutoPublishIds, setSelectedAutoPublishIds] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [notice, setNotice] = useState<Notice>(emptyNotice);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -190,6 +202,7 @@ export const App = () => {
         setSettings(state.settings);
         setProducts(state.products);
         setActiveStatus(state.activeStatus);
+        setSelectedAutoPublishIds(state.selectedAutoPublishIds);
         setSelectedId(state.products[0]?.id);
       })
       .catch((error: unknown) => {
@@ -210,23 +223,40 @@ export const App = () => {
   );
   const duplicates = useMemo(() => findDuplicateProducts(effectiveProducts), [effectiveProducts]);
   const duplicateIds = useMemo(() => new Set(duplicates.map((finding) => finding.productId)), [duplicates]);
+  const selectedAutoPublishIdSet = useMemo(() => new Set(selectedAutoPublishIds), [selectedAutoPublishIds]);
   const filteredProducts = effectiveProducts.filter(
     (product) => activeStatus === "All" || product.status === activeStatus
   );
   const selectedProduct = effectiveProducts.find((product) => product.id === selectedId) ?? filteredProducts[0];
   const selectedRisk = selectedProduct ? productRisk(selectedProduct) : undefined;
   const readyProducts = effectiveProducts.filter((product) => product.status === "Ready");
+  const selectedReadyProducts = readyProducts.filter((product) => selectedAutoPublishIdSet.has(product.id));
   const sessionProducts = useMemo(
-    () => limitAutoPublishProducts(effectiveProducts, settings.maxAutoPublishPerSession),
-    [effectiveProducts, settings.maxAutoPublishPerSession]
+    () => limitAutoPublishProducts(effectiveProducts, settings.maxAutoPublishPerSession, selectedAutoPublishIds),
+    [effectiveProducts, settings.maxAutoPublishPerSession, selectedAutoPublishIds]
   );
   const autoPublishDisabledReason = isSyncing
     ? "Sync is still running."
     : isAutoPublishing
       ? "Auto publish is already running."
-      : sessionProducts.length === 0
-        ? "Sync first and make sure at least one product is in Ready status."
+      : selectedAutoPublishIds.length === 0
+        ? "Select at least one Ready product in the queue for Auto publish."
+        : selectedReadyProducts.length === 0
+          ? "The selected products are not in Ready status."
+          : sessionProducts.length === 0
+            ? "No selected products are available for this session."
         : "";
+
+  useEffect(() => {
+    const readyIds = new Set(readyProducts.map((product) => product.id));
+    const nextSelectedIds = selectedAutoPublishIds.filter((id) => readyIds.has(id));
+    if (nextSelectedIds.length === selectedAutoPublishIds.length) {
+      return;
+    }
+
+    setSelectedAutoPublishIds(nextSelectedIds);
+    void saveSelectedAutoPublishIds(nextSelectedIds);
+  }, [readyProducts, selectedAutoPublishIds]);
 
   const blockingIssuesFor = (product: MarketplaceProduct) => {
     const risk = productRisk(product);
@@ -251,6 +281,30 @@ export const App = () => {
     await saveActiveStatus(status);
   };
 
+  const updateSelectedQueue = async (nextIds: string[]) => {
+    setSelectedAutoPublishIds(nextIds);
+    await saveSelectedAutoPublishIds(nextIds);
+  };
+
+  const toggleAutoPublishSelection = async (productId: string) => {
+    const isSelected = selectedAutoPublishIdSet.has(productId);
+    const nextIds = isSelected
+      ? selectedAutoPublishIds.filter((id) => id !== productId)
+      : [...selectedAutoPublishIds, productId];
+
+    await updateSelectedQueue(nextIds);
+  };
+
+  const selectVisibleProducts = async () => {
+    const visibleReadyIds = filteredProducts.filter((product) => product.status === "Ready").map((product) => product.id);
+    const nextIds = Array.from(new Set([...selectedAutoPublishIds, ...visibleReadyIds]));
+    await updateSelectedQueue(nextIds);
+  };
+
+  const clearSelectedProducts = async () => {
+    await updateSelectedQueue([]);
+  };
+
   const syncProducts = async () => {
     if (!settings.notionToken || !settings.databaseId) {
       setNotice({ tone: "error", text: "Add a Notion token and database ID before syncing." });
@@ -264,7 +318,10 @@ export const App = () => {
       const notionProducts = await queryNotionProducts({ token: settings.notionToken, databaseId: settings.databaseId });
       setProducts(notionProducts);
       setSelectedId(notionProducts[0]?.id);
+      const nextSelectedIds = selectedAutoPublishIds.filter((id) => notionProducts.some((product) => product.id === id));
+      setSelectedAutoPublishIds(nextSelectedIds);
       await saveProducts(notionProducts);
+      await saveSelectedAutoPublishIds(nextSelectedIds);
       setNotice({ tone: "ok", text: `Synced ${notionProducts.length} products from Notion.` });
     } catch (error: unknown) {
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "Notion sync failed." });
@@ -607,26 +664,85 @@ export const App = () => {
         ))}
       </nav>
 
+      <section className="queue-toolbar">
+        <p>
+          {selectedReadyProducts.length} selected for Auto publish
+          {selectedReadyProducts.length > settings.maxAutoPublishPerSession
+            ? `, ${sessionProducts.length} will run this session`
+            : ""}
+        </p>
+        <div className="queue-toolbar-actions">
+          <button onClick={selectVisibleProducts} disabled={isAutoPublishing || filteredProducts.every((product) => product.status !== "Ready")}>
+            Select visible
+          </button>
+          <button onClick={clearSelectedProducts} disabled={isAutoPublishing || selectedAutoPublishIds.length === 0}>
+            Clear
+          </button>
+        </div>
+      </section>
+
       <section className="queue">
         {filteredProducts.map((product) => {
           const risk = productRisk(product);
           const blocked = risk.errors.length > 0 || duplicateIds.has(product.id);
+          const isSelectedForAutoPublish = selectedAutoPublishIdSet.has(product.id);
+          const canSelectForAutoPublish = product.status === "Ready";
+          const currentAccountUpload = findAccountUpload(product, settings.activeMarketplaceAccountKey);
+          const thumbnailUrl = product.images[0]?.url;
 
           return (
-            <button
+            <div
               key={product.id}
               className={`product-row ${selectedProduct?.id === product.id ? "selected" : ""}`}
               onClick={() => setSelectedId(product.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setSelectedId(product.id);
+                }
+              }}
+              role="button"
+              tabIndex={0}
             >
+              <div
+                className={`publish-toggle ${isSelectedForAutoPublish ? "checked" : ""} ${canSelectForAutoPublish ? "" : "disabled"}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelectedForAutoPublish}
+                  disabled={!canSelectForAutoPublish || isAutoPublishing}
+                  onChange={() => void toggleAutoPublishSelection(product.id)}
+                  aria-label={`Select ${product.title || "Untitled product"} for Auto publish`}
+                />
+                <span>Auto</span>
+              </div>
+              <div className="product-thumb" aria-hidden="true">
+                {thumbnailUrl ? (
+                  <img
+                    src={thumbnailUrl}
+                    alt=""
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <span>No image</span>
+                )}
+              </div>
               <span className={`status-dot ${statusClass(product.status)}`} />
               <span className="product-main">
                 <strong>{product.title || "Untitled product"}</strong>
                 <small>
                   {product.price} {product.currency} | {product.location || "Missing location"} | {product.category || "No category"}
                 </small>
+                {currentAccountUpload ? (
+                  <small className={`account-upload-badge ${currentAccountUpload.status === "Published" ? "published" : "drafted"}`}>
+                    {uploadStatusLabel(currentAccountUpload.status)} | {currentAccountUpload.accountLabel}
+                  </small>
+                ) : null}
               </span>
               {blocked ? <AlertTriangle size={16} /> : <ShieldCheck size={16} />}
-            </button>
+            </div>
           );
         })}
         {filteredProducts.length === 0 ? <p className="empty-state">No products in this status.</p> : null}

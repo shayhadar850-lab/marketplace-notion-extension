@@ -23,9 +23,30 @@ describe("auto publish session", () => {
       makeProduct("4", "Ready")
     ];
 
-    const result = limitAutoPublishProducts(products, 2);
+    const result = limitAutoPublishProducts(products, 2, ["1", "2", "4"]);
 
     expect(result.map((product) => product.id)).toEqual(["1", "2"]);
+  });
+
+  it("only includes manually selected ready products", () => {
+    const products = [
+      makeProduct("1", "Ready"),
+      makeProduct("2", "Needs Fix"),
+      makeProduct("3", "Ready"),
+      makeProduct("4", "Published")
+    ];
+
+    const result = limitAutoPublishProducts(products, 5, ["2", "3", "4"]);
+
+    expect(result.map((product) => product.id)).toEqual(["3"]);
+  });
+
+  it("returns an empty queue when nothing was selected", () => {
+    const products = [makeProduct("1", "Ready"), makeProduct("2", "Ready")];
+
+    const result = limitAutoPublishProducts(products, 5, []);
+
+    expect(result).toEqual([]);
   });
 
   it("clamps the session limit to a safe positive number", () => {

@@ -10,7 +10,11 @@ export const clampSessionLimit = (value: number): number => {
 
 export const limitAutoPublishProducts = (
   products: MarketplaceProduct[],
-  maxAutoPublishPerSession: number
+  maxAutoPublishPerSession: number,
+  selectedProductIds: string[] = []
 ): MarketplaceProduct[] => {
-  return products.filter((product) => product.status === "Ready").slice(0, clampSessionLimit(maxAutoPublishPerSession));
+  const selectedIds = new Set(selectedProductIds);
+  return products
+    .filter((product) => product.status === "Ready" && selectedIds.has(product.id))
+    .slice(0, clampSessionLimit(maxAutoPublishPerSession));
 };

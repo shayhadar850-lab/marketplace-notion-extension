@@ -43,7 +43,9 @@ button:disabled {
 .topbar,
 .actions,
 .product-row,
-.notice {
+.notice,
+.queue-toolbar,
+.publish-toggle {
   display: flex;
   align-items: center;
 }
@@ -220,17 +222,74 @@ input {
   margin-bottom: 12px;
 }
 
+.queue-toolbar {
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.queue-toolbar p {
+  margin-bottom: 0;
+  font-size: 12px;
+  color: #516050;
+}
+
+.queue-toolbar-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.queue-toolbar-actions button {
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
 .product-row {
   width: 100%;
   gap: 10px;
-  min-height: 58px;
+  min-height: 72px;
   padding: 9px 10px;
   text-align: left;
+  border: 1px solid #c9c9c0;
+  background: #ffffff;
+  border-radius: 8px;
+  cursor: pointer;
 }
 
 .product-row.selected {
   outline: 2px solid #246b3d;
   border-color: #246b3d;
+}
+
+.publish-toggle {
+  gap: 6px;
+  padding: 3px 7px;
+  border: 1px solid #d5d3c9;
+  border-radius: 999px;
+  background: #f7f6f1;
+  color: #4f5e4d;
+  font-size: 11px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.publish-toggle.checked {
+  border-color: #246b3d;
+  background: #e8f3e8;
+  color: #225429;
+}
+
+.publish-toggle.disabled {
+  opacity: 0.6;
+}
+
+.publish-toggle input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: #246b3d;
 }
 
 .status-dot {
@@ -257,6 +316,32 @@ input {
   background: #5d5d66;
 }
 
+.product-thumb {
+  width: 52px;
+  height: 52px;
+  flex: 0 0 52px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #eef0e8;
+  border: 1px solid #dad8ce;
+  display: grid;
+  place-items: center;
+}
+
+.product-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.product-thumb span {
+  font-size: 10px;
+  color: #6a7369;
+  text-align: center;
+  padding: 4px;
+}
+
 .product-main {
   display: grid;
   gap: 3px;
@@ -273,6 +358,31 @@ input {
 
 .product-main small {
   color: #667064;
+}
+
+.account-upload-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-upload-badge.published {
+  background: #e8f3e8;
+  color: #225429;
+}
+
+.account-upload-badge.drafted {
+  background: #e7eef9;
+  color: #204f88;
 }
 
 .empty-state {

@@ -1,4 +1,4 @@
-import { loadState, saveSettings, type ExtensionSettings } from "../src/extension/storage";
+import { loadState, saveSelectedAutoPublishIds, saveSettings, type ExtensionSettings } from "../src/extension/storage";
 
 const storageState: Record<string, unknown> = {};
 
@@ -37,6 +37,7 @@ describe("extension storage", () => {
     expect(state.settings.activeMarketplaceAccountKey).toBe("");
     expect(state.settings.activeMarketplaceAccountLabel).toBe("");
     expect(state.settings.maxAutoPublishPerSession).toBe(5);
+    expect(state.selectedAutoPublishIds).toEqual([]);
   });
 
   it("persists the auto publish delay in settings", async () => {
@@ -61,5 +62,13 @@ describe("extension storage", () => {
     expect(state.settings.activeMarketplaceAccountKey).toBe("statica statica");
     expect(state.settings.activeMarketplaceAccountLabel).toBe("Statica Statica");
     expect(state.settings.maxAutoPublishPerSession).toBe(7);
+  });
+
+  it("persists the manually selected auto publish queue", async () => {
+    await saveSelectedAutoPublishIds(["page-1", "page-3"]);
+
+    const state = await loadState();
+
+    expect(state.selectedAutoPublishIds).toEqual(["page-1", "page-3"]);
   });
 });

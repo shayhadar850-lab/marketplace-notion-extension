@@ -17,6 +17,7 @@ export type StoredState = {
   settings: ExtensionSettings;
   products: MarketplaceProduct[];
   activeStatus: MarketplaceStatus | "All";
+  selectedAutoPublishIds: string[];
 };
 
 const defaultSettings: ExtensionSettings = {
@@ -35,16 +36,18 @@ const defaultSettings: ExtensionSettings = {
 const defaultState: StoredState = {
   settings: defaultSettings,
   products: [],
-  activeStatus: "Ready"
+  activeStatus: "Ready",
+  selectedAutoPublishIds: []
 };
 
 export const loadState = async (): Promise<StoredState> => {
-  const stored = await chrome.storage.local.get(["settings", "products", "activeStatus"]);
+  const stored = await chrome.storage.local.get(["settings", "products", "activeStatus", "selectedAutoPublishIds"]);
 
   return {
     settings: { ...defaultSettings, ...(stored.settings ?? {}) },
     products: stored.products ?? [],
-    activeStatus: stored.activeStatus ?? "Ready"
+    activeStatus: stored.activeStatus ?? "Ready",
+    selectedAutoPublishIds: stored.selectedAutoPublishIds ?? []
   };
 };
 
@@ -58,6 +61,10 @@ export const saveProducts = async (products: MarketplaceProduct[]): Promise<void
 
 export const saveActiveStatus = async (activeStatus: StoredState["activeStatus"]): Promise<void> => {
   await chrome.storage.local.set({ activeStatus });
+};
+
+export const saveSelectedAutoPublishIds = async (selectedAutoPublishIds: string[]): Promise<void> => {
+  await chrome.storage.local.set({ selectedAutoPublishIds });
 };
 
 export const resetState = async (): Promise<void> => {
